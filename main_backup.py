@@ -21,6 +21,10 @@ class ColorDetector(QObject):
         self.is_monitoring = False
         self.timer = QTimer()
         self.timer.timeout.connect(self.check_colors)
+        
+        # 이전에 찾은 색상 위치 저장
+        self.last_match_points = []
+        self.last_target_color = None
     
     def start_monitoring(self):
         """모니터링 시작"""
@@ -31,17 +35,31 @@ class ColorDetector(QObject):
         """모니터링 중지"""
         self.is_monitoring = False
         self.timer.stop()
+        # 모니터링 중지 시 저장된 포인트 초기화
+        self.last_match_points = []
     
     def set_target_color(self, color):
         """타겟 색상 설정"""
+        # 타겟 색상이 변경되면 저장된 포인트 초기화
+        if self.target_color != color:
+            self.last_match_points = []
+            self.last_target_color = None
         self.target_color = color
     
     def set_threshold(self, value):
         """색상 감지 임계값 설정"""
+        # 임계값이 변경되면 저장된 포인트 초기화
+        if self.threshold != value:
+            self.last_match_points = []
+            self.last_target_color = None
         self.threshold = value
     
     def set_monitoring_area(self, rect):
         """모니터링 영역 설정"""
+        # 모니터링 영역이 변경되면 저장된 포인트 초기화
+        if self.monitoring_area != rect:
+            self.last_match_points = []
+            self.last_target_color = None
         self.monitoring_area = rect
     
     def check_colors(self):
@@ -52,18 +70,72 @@ class ColorDetector(QObject):
         try:
             # 모니터링 영역 스크린샷 캡처
             x, y, w, h = self.monitoring_area.x(), self.monitoring_area.y(), self.monitoring_area.width(), self.monitoring_area.height()
-            screenshot = ImageGrab.grab(bbox=(x, y, x+w, y+h))
-            img_array = np.array(screenshot)
             
             # 타겟 색상 RGB 값
             target_r, target_g, target_b = self.target_color.red(), self.target_color.green(), self.target_color.blue()
             
+            # 이전에 찾은 위치가 있고 색상이 변경되지 않았으면 해당 위치만 먼저 확인
+            if self.last_match_points and self.last_target_color == self.target_color:
+                # 각 포인트의 현재 색상 확인
+                valid_points = []
+                screenshot = None  # 필요할 때만 스크린샷 캡처
+                
+                for point in self.last_match_points:
+                    # 이 포인트가 현재 모니터링 영역 내에 있는지 확인
+                    if not self.monitoring_area.contains(point):
+                        continue
+                    
+                    # 스크린샷이 아직 없으면 캡처
+                    if screenshot is None:
+                        screenshot = ImageGrab.grab(bbox=(x, y, x+w, y+h))
+                        img_array = np.array(screenshot)
+                    
+                    # 화면 좌표에서 스크린샷 상대 좌표로 변환
+                    px = point.x() - x
+                    py = point.y() - y
+                    
+                    # 스크린샷 범위 내에 있는지 확인
+                    if 0 <= px < w and 0 <= py < h:
+                        # 현재 픽셀 색상 가져오기
+                        pixel = img_array[py, px]
+                        r, g, b = pixel
+                        
+                        # 임계값 계산
+                        r_min = max(0, target_r - self.threshold)
+                        r_max = min(255, target_r + self.threshold)
+                        g_min = max(0, target_g - self.threshold)
+                        g_max = min(255, target_g + self.threshold)
+                        b_min = max(0, target_b - self.threshold)
+                        b_max = min(255, target_b + self.threshold)
+                        
+                        # 색상이 임계값 내에 있는지 확인
+                        if (r_min <= r <= r_max and 
+                            g_min <= g <= g_max and 
+                            b_min <= b <= b_max):
+                            valid_points.append(point)
+                
+                # 유효한 포인트가 있으면 전체 검사 건너뛰기
+                if valid_points:
+                    self.last_match_points = valid_points  # 이번에 확인된 유효한 포인트만 저장
+                    self.color_detected.emit(valid_points, self.target_color)
+                    return
+            
+            # 이전 포인트가 유효하지 않거나 처음 검사하는 경우 전체 검사 수행
+            screenshot = ImageGrab.grab(bbox=(x, y, x+w, y+h))
+            img_array = np.array(screenshot)
+            
             # 픽셀 검사
             match_points = self._check_colors_pixel_mode(img_array, target_r, target_g, target_b, x, y)
             
-            # 발견된 색상 위치가 있으면 시그널 전송
+            # 발견된 색상 위치가 있으면 시그널 전송 및 저장
             if match_points:
+                self.last_match_points = match_points.copy()  # 찾은 포인트 저장
+                self.last_target_color = QColor(self.target_color)  # 현재 타겟 색상 저장
                 self.color_detected.emit(match_points, self.target_color)
+            else:
+                # 매치된 포인트가 없으면 저장된 포인트 초기화
+                self.last_match_points = []
+                
         except Exception as e:
             print(f"오류 발생: {e}")
     
